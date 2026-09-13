@@ -1,0 +1,149 @@
+<mujoco model="dinner_table_world">
+  <!--
+    Static world for the Intel Physical AI bimanual dinner-table challenge.
+    The two SO-101 arms and the task objects are attached programmatically
+    in envs/dinner_table_env.py (MuJoCo MjSpec) so they can be randomized per seed.
+
+    World frame: x = along the counter (drawer cavity at -x end, placemat at +x)
+                 y = across the counter (arm A at -y, arm B at +y)
+                 z = up. Countertop surface at z = 0.75 m.
+
+    Drawer: sliding drawer in the counter's left end, opening toward +x
+    (toward the workspace centre / arm A's working zone). Cavity
+    x [-0.42,-0.16], tray travel 0.24 m along +x. Tray floor top at
+    z = 0.612 (utensils sit there when the drawer is open).
+  -->
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.005" integrator="implicitfast" cone="elliptic"
+          iterations="10" ls_iterations="20" impratio="10"/>
+
+  <visual>
+    <global offwidth="1280" offheight="720"/>
+    <headlight ambient="0.35 0.35 0.35" diffuse="0.55 0.55 0.55" specular="0.1 0.1 0.1"/>
+  </visual>
+
+  <asset>
+    <texture name="skybox" type="skybox" builtin="gradient"
+             rgb1="0.42 0.48 0.60" rgb2="0.85 0.88 0.92" width="256" height="256"/>
+    <texture name="floor_tex" type="2d" builtin="checker" rgb1="0.55 0.53 0.50" rgb2="0.42 0.40 0.38"
+             width="300" height="300"/>
+    <material name="floor_mat" texture="floor_tex" texuniform="true" texrepeat="4 4" reflectance="0.05"/>
+    <material name="counter_top" rgba="0.62 0.47 0.36 1"/>
+    <material name="counter_leg" rgba="0.30 0.25 0.22 1"/>
+    <material name="cabinet_mat" rgba="0.50 0.52 0.56 1"/>
+    <material name="drawer_mat" rgba="0.36 0.44 0.78 1"/>
+    <material name="drawer_inner" rgba="0.72 0.74 0.78 1"/>
+    <material name="handle_mat" rgba="0.85 0.65 0.15 1"/>
+  </asset>
+
+  <worldbody>
+    <light name="key_light" pos="0.2 -0.8 2.6" dir="0 0.25 -1" directional="true"
+           diffuse="0.75 0.75 0.8" specular="0.15 0.15 0.2" castshadow="true"/>
+    <light name="fill_light" pos="1.6 0.9 2.0" dir="-0.55 -0.3 -1" directional="true"
+           diffuse="0.4 0.42 0.46" specular="0 0 0"/>
+
+    <geom name="floor" type="plane" size="0 0 0.05" material="floor_mat"
+          condim="3" friction="1 0.005 0.0001"/>
+
+    <!-- Backdrop wall (behind the counter, +y side; rgba randomized per seed) -->
+    <geom name="backdrop" type="box" pos="0.2 1.4 1.25" size="2.2 0.05 1.25"
+          rgba="0.68 0.71 0.76 1"/>
+
+    <!-- ================= COUNTER / TABLE =================
+         Countertop: x in [-0.40, 0.50], y in [-0.35, 0.35], top z = 0.75.
+         Left end (-x) hosts the drawer cavity; the drawer slides out
+         toward +x underneath the countertop overhang. -->
+    <body name="counter" pos="0.05 0 0">
+      <geom name="countertop" type="box" pos="0.175 0 0.73" size="0.325 0.35 0.02" material="counter_top"/>
+      <!-- apron / back panel (+y side) -->
+      <geom name="counter_back" type="box" pos="0 0.345 0.655" size="0.45 0.005 0.055" rgba="0.55 0.42 0.32 1"/>
+      <!-- front skirt on the -y side but ONLY where the drawer is NOT
+           (drawer cavity occupies x in world [-0.37,-0.11], i.e. counter
+           local x [-0.42,-0.16]) -->
+      <geom name="counter_skirt_a" type="box" pos="-0.415 -0.345 0.655" size="0.035 0.005 0.055" rgba="0.55 0.42 0.32 1"/>
+      <geom name="counter_skirt_b" type="box" pos="0.16 -0.345 0.655" size="0.29 0.005 0.055" rgba="0.55 0.42 0.32 1"/>
+      <!-- skirt above the drawer opening (thin lip) -->
+      <geom name="counter_skirt_c" type="box" pos="-0.13 -0.345 0.685" size="0.155 0.005 0.025" rgba="0.55 0.42 0.32 1"/>
+      <!-- legs (the -x pair sits clear of the drawer slide path at
+           y in [-0.27,-0.09]; shifted to y = ±0.32) -->
+      <geom name="leg_1" type="box" pos="-0.36 0.32 0.355" size="0.035 0.035 0.355" material="counter_leg"/>
+      <geom name="leg_2" type="box" pos="-0.36 -0.32 0.355" size="0.035 0.035 0.355" material="counter_leg"/>
+      <geom name="leg_3" type="box" pos="0.40 0.30 0.355" size="0.035 0.035 0.355" material="counter_leg"/>
+      <geom name="leg_4" type="box" pos="0.40 -0.30 0.355" size="0.035 0.035 0.355" material="counter_leg"/>
+
+      <!-- ============ DRAWER UNIT (standalone cabinet, left of counter) ============
+           The cabinet stands fully left of the countertop (which spans
+           world x [-0.40,0.50]). The tray slides +x 0.26; when open, the
+           tray's -x portion sits in the open (left of the countertop
+           edge) where arm A can reach from above/-y. The handle at
+           x = -0.695 (closed) is fully clear of any overhang. -->
+      <body name="drawer_unit" pos="-0.73 -0.18 0">  <!-- child of counter; world x = -0.68 -->
+        <!-- cabinet pedestal to the floor (the unit previously floated) -->
+        <geom name="shell_pedestal" type="box" pos="0.05 0 0.26" size="0.15 0.085 0.26" material="cabinet_mat"/>
+        <!-- cabinet bottom (under tray, full slide length) -->
+        <geom name="shell_bottom" type="box" pos="0.06 0 0.529" size="0.20 0.10 0.006" material="cabinet_mat"/>
+        <!-- cabinet back (-x end) -->
+        <geom name="shell_back" type="box" pos="-0.14 0 0.595" size="0.006 0.10 0.066" material="cabinet_mat"/>
+        <!-- (no cabinet sides: the drawer front must pass — see the
+             drawer-cycle stress test in the test suite) -->
+
+        <!-- ============ SLIDING DRAWER TRAY ============
+             Slides along +x when qpos positive (axis 1 0 0),
+             range [0, 0.26]. CLOSED tray interior (world):
+             x [-0.805,-0.545], y [-0.265,-0.095]; OPEN tray: +0.26.
+             Tray floor top at world z = 0.612. -->
+        <body name="drawer" pos="0 0 0">
+          <joint name="drawer_slide" type="slide" axis="1 0 0" range="0 0.26"
+                 damping="1.2" frictionloss="0.35" armature="0.01"/>
+          <!-- front panel (closed front face at world x = -0.5525) -->
+          <!-- front panel: full-width top bar + one lower side stub. The
+               lower band is slotted (y -0.10..0.07) so the gripper jaw
+               assembly can pass through axially for utensil retrieval -->
+          <geom name="drawer_front" type="box" pos="0.1275 0 0.6175" size="0.0125 0.10 0.0125" material="drawer_mat"/>
+          <geom name="drawer_front_side" type="box" pos="0.1275 0.085 0.59" size="0.0125 0.015 0.015" material="drawer_mat"/>
+          <!-- handle: vertical post on the front panel's +x face
+               (world x face -0.5275; post spans x [-0.525,-0.505],
+               z [0.61,0.73]) — side-grasped from +x like a utensil
+               shaft, in the clear corridor between cabinet and counter -->
+          <geom name="drawer_handle" type="box" pos="0.19 0 0.62" size="0.010 0.012 0.030"
+                material="handle_mat" friction="1.2 0.005 0.0001"/>
+          <!-- floor (top at world z = 0.612) -->
+          <geom name="drawer_floor" type="box" pos="0 0 0.556" size="0.115 0.09 0.006" material="drawer_inner"/>
+          <!-- side walls -->
+          <geom name="drawer_wall_n" type="box" pos="0 0.085 0.605" size="0.115 0.0075 0.043" material="drawer_inner"/>
+          <geom name="drawer_wall_s" type="box" pos="0 -0.085 0.605" size="0.115 0.0075 0.043" material="drawer_inner"/>
+          <!-- back wall -->
+          <geom name="drawer_back" type="box" pos="-0.1075 0 0.605" size="0.0075 0.09 0.043" material="drawer_inner"/>
+        </body>
+      </body>
+    </body>
+
+    <!-- ================= PLACEMAT (visual) + SLOT MARKERS =================
+         Placemat centre at world (0.25, 0, 0.752); slots: plate / fork /
+         spoon / mug (goal poses for perception and evaluation). -->
+    <body name="placemat" pos="0.25 0 0.752">
+      <geom name="placemat_pad" type="box" pos="0 0 0.0015" size="0.21 0.16 0.0015"
+            rgba="0.82 0.80 0.76 1" friction="1.0 0.005 0.0001"/>
+      <site name="slot_plate"  pos="0.00  0.03 0.004" size="0.004" rgba="0.9 0.1 0.1 0.5"/>
+      <site name="slot_fork"   pos="-0.14 -0.10 0.004" size="0.004" rgba="0.1 0.9 0.1 0.5"/>
+      <site name="slot_spoon"  pos="-0.14  0.10 0.004" size="0.004" rgba="0.1 0.9 0.1 0.5"/>
+      <site name="slot_mug"    pos="0.06 -0.10 0.004" size="0.004" rgba="0.1 0.1 0.9 0.5"/>
+    </body>
+
+    <!-- ================= CAMERAS =================
+         MuJoCo cameras look along the -z axis of their frame, so with
+         xyaxes="x y" the optical direction is -(x cross y). The bases
+         below were computed as look-at bases targeting the scene
+         (z = x cross y points AWAY from the target). -->
+    <!-- wide 3/4 view (hero camera for the demo video) -->
+    <camera name="overview" pos="1.35 -1.35 1.6" xyaxes="0.7203 0.6936 0 -0.278 0.2887 0.9161" fovy="45"/>
+    <!-- top-down of the whole workspace -->
+    <camera name="overhead" pos="0.0 -0.05 1.75" xyaxes="1 0 0 0 1 0" fovy="50"/>
+    <!-- close-up on the drawer (opens toward +x) -->
+    <camera name="drawer_cam" pos="-0.60 -0.95 1.10" xyaxes="0.9979 -0.0648 0 0.03318 0.511 0.8589" fovy="55"/>
+    <!-- close-up on the placemat -->
+    <camera name="placemat_cam" pos="0.60 -0.85 1.25" xyaxes="0.9247 0.3807 0 -0.1733 0.4209 0.8904" fovy="50"/>
+    <!-- top-down of placemat for pose perception -->
+    <camera name="wrist_top" pos="0.25 0 0.95" xyaxes="1 0 0 0 1 0" fovy="40"/>
+  </worldbody>
+</mujoco>
