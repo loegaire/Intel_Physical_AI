@@ -45,3 +45,11 @@ models/
 
 # Logs
 *.log
+
+# Large binary assets (generated via scripts/generate_assets.py)
+assets/so101/*.stl
+assets/so101/*.dae
+assets/so101/*.obj
+*.stl
+*.dae
+*.obj

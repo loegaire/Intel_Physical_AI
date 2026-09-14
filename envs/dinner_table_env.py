@@ -37,7 +37,10 @@ import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORLD_XML = os.path.join(ROOT, "envs", "world.xml")
-SO101_XML = os.path.join(ROOT, "assets", "so101", "so101.xml")
+# Use generated model (no STL dependencies) with fallback to original
+SO101_XML_GEN = os.path.join(ROOT, "assets", "so101", "so101_generated.xml")
+SO101_XML_ORIG = os.path.join(ROOT, "assets", "so101", "so101.xml")
+SO101_XML = SO101_XML_GEN if os.path.exists(SO101_XML_GEN) else SO101_XML_ORIG
 
 # Drawer geometry (world frame; see envs/world.xml):
 # drawer body frame at world (-0.68, -0.18, 0); tray floor top at z = 0.612.
