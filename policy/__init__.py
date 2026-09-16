@@ -10,6 +10,10 @@ from policy.orchestrator import (
     SkillSpec, Plan, Planner, SkillExecutor, Orchestrator,
     run_evaluation,
 )
+from policy.vla import (
+    ActionAdapter, SmolVLARunner, VLAContractError,
+    action_dim_from_config, build_lerobot_frame, simulator_state,
+)
 
 __all__ = [
     # IK
@@ -21,4 +25,7 @@ __all__ = [
     # Orchestrator
     "SkillSpec", "Plan", "Planner", "SkillExecutor", "Orchestrator",
     "run_evaluation",
+    # VLA integration
+    "ActionAdapter", "SmolVLARunner", "VLAContractError",
+    "action_dim_from_config", "build_lerobot_frame", "simulator_state",
 ]

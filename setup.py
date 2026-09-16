@@ -20,15 +20,17 @@ setup(
     python_requires=">=3.10",
     install_requires=[
         "mujoco>=3.2.0",
-        "numpy>=1.24.0",
+        "numpy>=2.0.0,<2.3.0",
         "opencv-python>=4.8.0",
     ],
     extras_require={
         "openvino": ["openvino>=2024.0.0"],
         "ml": [
             "transformers>=4.36.0",
-            "torch>=2.1.0",
+            "torch>=2.7.0,<2.12.0",
+            "torchvision>=0.22.0,<0.27.0",
             "accelerate>=0.25.0",
+            "lerobot[smolvla]==0.6.1",
         ],
         "viz": [
             "matplotlib>=3.8.0",
@@ -44,8 +46,10 @@ setup(
         "all": [
             "openvino>=2024.0.0",
             "transformers>=4.36.0",
-            "torch>=2.1.0",
+            "torch>=2.7.0,<2.12.0",
+            "torchvision>=0.22.0,<0.27.0",
             "accelerate>=0.25.0",
+            "lerobot[smolvla]==0.6.1",
             "matplotlib>=3.8.0",
             "imageio>=2.34.0",
             "imageio-ffmpeg>=0.4.9",

@@ -1,7 +1,7 @@
 # Intel Physical AI Challenge - Requirements
 # Core dependencies
 mujoco>=3.2.0
-numpy>=1.24.0
+numpy>=2.0.0,<2.3.0
 opencv-python>=4.8.0
 
 # OpenVINO (for Intel hardware optimization)
@@ -9,11 +9,12 @@ openvino>=2024.0.0
 
 # Robotics / ML
 transformers>=4.36.0
-torch>=2.1.0
+torch>=2.7.0,<2.12.0
+torchvision>=0.22.0,<0.27.0
 accelerate>=0.25.0
 
 # LeRobot (for training VLA policies)
-# lerobot>=1.0.0  # Install from source if needed
+lerobot[smolvla]==0.6.1
 
 # Visualization
 matplotlib>=3.8.0
