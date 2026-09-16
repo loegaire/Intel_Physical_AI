@@ -1,253 +1,295 @@
-# Intel Physical AI Online Challenge
-## Bimanual VLA Manipulation with Multi-Modal Reasoning
-### Challenge Option: Setting Up a Dinner Table
+# Intel Physical AI: SmolVLA Dinner-Table Pipeline
 
----
+Closed-loop SmolVLA inference in a randomized MuJoCo scene with two SO-101 arms.
+The runner builds LeRobot observations from simulator cameras and robot state,
+executes policy actions in the environment, records the real control trajectory,
+and writes machine-readable evaluation results.
 
-## Overview
+## Current status
 
-This repository implements a complete Physical AI solution for the Intel Physical AI Online Challenge. The task requires two simulated SO-101 arms in MuJoCo to interpret natural-language instructions, reason over camera observations, coordinate both manipulators, and complete a multi-step table-setting task.
+The pipeline itself is operational:
 
-**Core Goal**: Demonstrate a robust perception-to-action pipeline where a multi-modal policy understands task instructions, reasons over the simulated scene, coordinates two robot arms, and completes the requested manipulation sequence on Intel Core Ultra Series 2/3 hardware.
+- local SmolVLA checkpoint loading and closed-loop MuJoCo inference work;
+- single-seed and multi-seed runs use the same evaluation contract;
+- a multi-seed run creates one `SmolVLARunner`, so model weights are loaded once
+  and reused across all seeds;
+- the policy action queue and environment are reset at every episode boundary;
+- videos contain one frame per executed control step;
+- `evaluation.json` reports full-task success and per-seed details.
 
----
+The included checkpoint is a stock 6D SO-100/SmolVLA checkpoint. It controls one
+selected arm and is **not fine-tuned for this dinner-table task**. A successful
+pipeline run therefore proves that inference, action adaptation, simulation, and
+artifact generation work; it does not by itself prove task completion.
 
-## Repository Structure
+`success` has one strict meaning throughout this repository: the plate, mug,
+spoon, and fork are placed at their targets and the mug has been filled.
 
+## Pipeline
+
+```text
+instruction + 3 RGB cameras + joint state
+                    |
+                    v
+          LeRobot preprocessing
+                    |
+                    v
+               SmolVLA
+                    |
+                    v
+       6D / 12D / 13D action adapter
+                    |
+                    v
+       MuJoCo step -> video + metrics
 ```
+
+The action contract is explicit:
+
+| Checkpoint action size | Simulator mapping |
+| --- | --- |
+| 6 | Selected arm; the other arm is held; drawer command is neutral |
+| 12 | Both arms; drawer command is neutral |
+| 13 | Both arms plus drawer command |
+
+Actions with unsupported dimensions, `NaN`, or infinite values are rejected.
+The stock SO-100 checkpoint uses degrees; the simulator uses radians, and the
+adapter performs that conversion.
+
+## Requirements
+
+- Linux recommended; headless rendering is supported with EGL
+- Python 3.10 or newer
+- MuJoCo 3.x
+- a PyTorch and torchvision pair compatible with `lerobot[smolvla]`
+- enough disk space for the checkpoint and its Hugging Face base-model cache
+
+Create an isolated environment and install the project:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[all]"
+```
+
+Run the tests before a demo:
+
+```bash
+pytest -q
+```
+
+The tests cover the VLA state/action contract, multi-seed runner reuse, and
+perception behavior without loading the full model for every unit test.
+
+## Run SmolVLA
+
+The local checkpoint is stored at `models/smolvla`. Its configuration references
+the SmolVLM base model, so that base model must also already exist in the local
+Hugging Face cache for a fully offline run.
+
+On the current headless setup, use offline mode to prevent Transformers from
+making metadata requests for files such as `chat_template.jinja`:
+
+```bash
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 MUJOCO_GL=egl \
+python scripts/run_demo.py \
+  --policy smolvla \
+  --checkpoint models/smolvla \
+  --device cpu \
+  --controlled-arm A \
+  --joint-units degrees \
+  --seed 0 \
+  --max-steps 1000 \
+  --video results/smolvla_seed_00.mp4
+```
+
+For a fast integration smoke test, change `--max-steps 1000` to
+`--max-steps 1`. CPU inference works but can be slow; choose an available device
+explicitly when using an accelerator.
+
+### Ten seeds, one model load
+
+```bash
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 MUJOCO_GL=egl \
+python scripts/run_demo.py \
+  --policy smolvla \
+  --checkpoint models/smolvla \
+  --device cpu \
+  --controlled-arm A \
+  --joint-units degrees \
+  --seed 0 \
+  --seeds 10 \
+  --max-steps 1000 \
+  --video \
+  --output-dir results/smolvla_10_seeds
+```
+
+This loads the checkpoint once, then runs seeds 0 through 9. It writes:
+
+```text
+results/smolvla_10_seeds/
+├── demo_seed_00.mp4
+├── ...
+├── demo_seed_09.mp4
+└── evaluation.json
+```
+
+For metrics without video encoding:
+
+```bash
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 MUJOCO_GL=egl \
+python scripts/run_demo.py \
+  --policy smolvla \
+  --checkpoint models/smolvla \
+  --device cpu \
+  --eval-only \
+  --seeds 10 \
+  --output-dir results/smolvla_eval
+```
+
+`--eval-only` defaults to ten seeds when `--seeds` is omitted and never records
+video.
+
+## Video behavior
+
+The environment runs at 50 control steps per second and the recorder writes one
+frame after every step at 50 FPS. Therefore:
+
+```text
+video duration in seconds = executed steps / 50
+```
+
+For example, 100 steps produce about 2 seconds of video, while 1000 steps
+produce at most about 20 seconds. An episode that terminates early produces a
+shorter video. Stopping the process before the writer closes can leave an invalid
+or nearly empty MP4; rerun to a new filename instead of treating an old file in
+`results/` as current evidence.
+
+Useful checks:
+
+```bash
+ffprobe -v error \
+  -show_entries stream=codec_name,width,height,avg_frame_rate,nb_frames,duration \
+  -of default=noprint_wrappers=1 results/smolvla_seed_00.mp4
+
+python -m json.tool results/smolvla_10_seeds/evaluation.json >/dev/null
+```
+
+## Evaluation output
+
+For SmolVLA, each per-seed result includes:
+
+- strict full-task `success`;
+- executed `steps` and accumulated reward;
+- checkpoint action dimension and `bimanual` status;
+- selected arm and checkpoint joint units;
+- mean, p50, p90, and p99 inference latency;
+- final environment task state.
+
+The multi-seed summary contains the seed list, number of successful episodes,
+success rate, and all per-seed records.
+
+## Main command-line options
+
+| Option | Meaning |
+| --- | --- |
+| `--policy classical\|smolvla` | Select the policy implementation |
+| `--checkpoint PATH` | SmolVLA checkpoint directory |
+| `--device DEVICE` | PyTorch device, for example `cpu` or `cuda` |
+| `--controlled-arm A\|B` | Arm controlled by a 6D checkpoint |
+| `--joint-units degrees\|radians` | Units emitted by the checkpoint |
+| `--seed N` | First seed |
+| `--seeds N` | Number of consecutive seeds |
+| `--max-steps N` | Maximum control steps per episode |
+| `--video [PATH]` | Record one run, or enable per-seed videos |
+| `--output-dir PATH` | Multi-seed videos and `evaluation.json` |
+| `--eval-only` | Multi-seed evaluation without video |
+| `--instruction TEXT` | Natural-language task instruction |
+| `--quiet` | Reduce console output |
+
+See the authoritative CLI at any time:
+
+```bash
+python scripts/run_demo.py --help
+```
+
+## Classical policy and data collection
+
+The classical perception/skill stack remains available as a development
+baseline. It is not the SmolVLA path and should not be presented as proof that
+the learned policy solved the challenge.
+
+```bash
+MUJOCO_GL=egl python scripts/run_demo.py \
+  --policy classical --seed 0 --video results/classical_seed_00.mp4
+```
+
+`--strict-perception` disables privileged pose fallback for the classical policy.
+
+The dataset collector admits only complete-task successes by default. Use
+`--keep-failures` only when failed trajectories are intentionally wanted:
+
+```bash
+MUJOCO_GL=egl python scripts/collect_expert_dataset.py \
+  --seeds 10 \
+  --strict-perception \
+  --output-dir data/expert
+```
+
+## OpenVINO scope
+
+The files under `models/vla_openvino/` and the conversion/benchmark scripts are
+experimental deployment scaffolding. They are not evidence of an exported,
+quality-equivalent SmolVLA policy.
+
+The included IR can be used to validate benchmark plumbing:
+
+```bash
+python scripts/benchmark_openvino.py \
+  --model-path models/vla_openvino/vla.xml \
+  --device CPU \
+  --output results/openvino_runtime.json
+```
+
+When `--input-npz` is omitted, every model input is synthetic. Such a run measures
+runtime behavior only, not policy quality. A quality-relevant benchmark requires
+an exported production model and an NPZ containing every named, already
+preprocessed model input.
+
+## Repository layout
+
+```text
 Intel_Physical_AI/
-├── assets/
-│   └── so101/                 # SO-101 robot meshes and XML
+├── assets/                         SO-101 simulation assets
 ├── envs/
-│   ├── dinner_table_env.py    # Main MuJoCo environment
-│   └── world.xml              # World scene (table, drawer, cameras)
-├── perception/
-│   ├── camera_model.py        # Pinhole camera model for MuJoCo
-│   ├── detector.py            # RGB-D object detector (classical CV)
-│   └── perception.py          # Multi-camera fusion module
+│   ├── dinner_table_env.py         MuJoCo environment and task metric
+│   └── world.xml                   Scene, robots, objects, and cameras
+├── perception/                     Classical RGB-D perception
 ├── policy/
-│   ├── ik.py                  # Inverse kinematics solvers
-│   ├── skills.py              # Manipulation skills (Grasp, Place, etc.)
-│   └── orchestrator.py        # Task planner and skill sequencer
+│   ├── vla.py                      SmolVLA runner and action adapter
+│   ├── orchestrator.py             Classical task sequencer
+│   ├── skills.py                   Classical manipulation skills
+│   └── ik.py                       Inverse kinematics
 ├── scripts/
-│   ├── run_demo.py            # Demo/evaluation runner
-│   ├── benchmark_openvino.py  # OpenVINO inference benchmark
-│   ├── study_workspace.py     # Workspace feasibility study
-│   └── check_perception.py    # Perception accuracy check
+│   ├── run_demo.py                 Demo and multi-seed evaluation
+│   ├── collect_expert_dataset.py   Demonstration collector
+│   ├── benchmark_openvino.py       OpenVINO runtime benchmark
+│   └── export_smolvla_to_openvino.py
+├── tests/                          Contract and regression tests
+├── models/                         Local checkpoints and experimental exports
 ├── requirements.txt
-├── setup.py
-└── README.md
+└── setup.py
 ```
 
----
+## Known limitations
 
-## Quick Start
-
-### Installation
-
-```bash
-# Clone and install
-git clone https://github.com/loegaire/Intel_Physical_AI
-cd Intel_Physical_AI
-pip install -e .[all]
-```
-
-### Run a Demo
-
-```bash
-# Single seed demo with video
-python scripts/run_demo.py --seed 0 --video demo.mp4
-
-# Multi-seed evaluation (10 seeds)
-python scripts/run_demo.py --seeds 10 --output-dir results
-
-# Evaluation only (no video)
-python scripts/run_demo.py --eval-only --seeds 10
-```
-
-### Benchmark Inference
-
-```bash
-# OpenVINO benchmark (requires model)
-python scripts/benchmark_openvino.py --model-path models/vla.xml --device CPU
-
-# Perception pipeline benchmark
-python scripts/benchmark_openvino.py --perception-only
-
-# Skill execution benchmark
-python scripts/benchmark_openvino.py --skills-only
-```
-
-### Workspace Study
-
-```bash
-# Check reachability of key workspace targets
-python scripts/study_workspace.py
-```
-
-### Perception Check
-
-```bash
-# Evaluate perception accuracy across seeds
-python scripts/check_perception.py 5
-```
-
----
-
-## System Architecture
-
-### 1. Simulation Environment (`envs/dinner_table_env.py`)
-
-- **Physics**: MuJoCo 3.x, 200 Hz simulation, 50 Hz control
-- **Robots**: Two Menagerie SO-101 arms (6 DoF each + gripper)
-- **Scene**: Counter with sliding drawer (left), placemat with slots (right)
-- **Objects**: Plate, mug, bottle, spoon, fork (randomized per seed)
-- **Domain Randomization**: Position, yaw, friction, mass, size, color, lighting
-- **Cameras**: Overview, overhead, drawer_cam, placemat_cam, wrist_top
-
-### 2. Perception Pipeline (`perception/`)
-
-- **Camera Model**: Pinhole projection with MuJoCo camera poses
-- **Detector**: Classical RGB-D detection using HSV color thresholds + depth masks
-- **Fusion**: Exponential moving average with outlier gating
-- **Outputs**: World-frame object positions, yaw estimates, drawer slide estimate
-
-**Perception-to-Skill Interface**: The environment provides a `set_pose_provider()` method that routes object pose queries through the perception module, enabling seamless swap from privileged state to camera-based estimates.
-
-### 3. Manipulation Skills (`policy/skills.py`)
-
-Each skill is a finite state machine producing 13-DoF actions (12 arm joints + drawer force) at 50 Hz:
-
-| Skill | Description |
-|-------|-------------|
-| `MoveTo` | Cartesian transit with lift/translate/descent phases |
-| `Grasp` | Side/top-down grasp with jaw alignment via roll sweep |
-| `Place` | Carry to goal, descend, release, retreat |
-| `OpenDrawer` | Side-grasp handle post, pull drawer open |
-| `Pour` | Tilt bottle over mug until pour detected |
-
-**IK Solvers** (`policy/ik.py`):
-- Damped least-squares position IK (5-DoF)
-- Oriented IK (position + approach axis, 5-DoF)
-- Fixed-roll IK (4-DoF position with pinned wrist_roll)
-- Randomized restarts for global convergence
-
-### 4. Orchestrator (`policy/orchestrator.py`)
-
-- **Planner**: Rule-based natural language → skill sequence (VLA-ready stub)
-- **Executor**: Runs skills to completion with perception updates
-- **Perception Integration**: Skills consume poses via env pose provider
-- **Evaluation**: Multi-seed success rate reporting
-
-### 5. VLA Integration (Planned)
-
-The architecture is designed for VLA policy swap-in:
-
-```python
-# Current: Classical skills
-orchestrator = Orchestrator(env, perception)
-orchestrator.execute_instruction("Set the table for dinner")
-
-# Future: VLA policy (SmolVLA, Pi0.5, ACT)
-vla_policy = load_vla_model("openvino_model.xml")
-actions = vla_policy(obs, instruction)
-```
-
-The perception module (`PerceptionModule.update()`) is the single swap point for a learned perception backbone.
-
----
-
-## Challenge Requirements Mapping
-
-| Requirement | Implementation |
-|-------------|----------------|
-| Bimanual manipulation | Two SO-101 arms with coordinated skills |
-| Multi-modal reasoning | Orchestrator parses NL → skill plans; perception fuses RGB-D |
-| Robustness under perturbation | Domain randomization in env; evaluation across 10 seeds |
-| Simulation training | LeRobot-compatible env; policy/skills as imitation baseline |
-| Intel Edge Optimization | OpenVINO benchmark script; model compilation for CPU/GPU/NPU |
-| Reproducible repo | Setup.py, requirements, entry points, deterministic seeds |
-| MuJoCo simulation | `envs/dinner_table_env.py` with full randomization |
-| Benchmark script | `scripts/benchmark_openvino.py` |
-| Demo video | `scripts/run_demo.py --video` |
-| Technical README | This file |
-
----
-
-## Key Features
-
-### Domain Randomization
-Per-seed randomization of:
-- Object positions (±3 cm), yaw (±0.4 rad)
-- Friction (0.7–1.3×), mass (0.75–1.3×), size (0.92–1.08×)
-- Colors (±0.05 RGB), background hue, lighting
-
-### Honest Physics
-- Drawer only moves when gripper physically holds handle (`gripper_handles_drawer()`)
-- Grasp contact detected via MuJoCo contact pairs
-- No privileged state in skill execution (except for debugging)
-
-### Intel Optimization Ready
-- OpenVINO benchmark measures latency, throughput, device utilization
-- Async inference queue for sustained throughput
-- FP16/INT8 precision support via model conversion
-- Performance hints for Intel CPU/GPU/NPU
-
----
-
-## Evaluation
-
-Run the standard evaluation across 10 randomized seeds:
-
-```bash
-python scripts/run_demo.py --eval-only --seeds 10
-```
-
-Expected outputs:
-- Per-seed success/failure
-- Overall success rate
-- Per-skill timing and status
-- Task state (object placement, mug filled)
-
----
-
-## Extending for VLA Policies
-
-To integrate a VLA policy (SmolVLA, Pi0.5, ACT):
-
-1. **Convert model to OpenVINO IR**:
-   ```bash
-   mo --input_model model.onnx --output_dir models/vla_openvino
-   ```
-
-2. **Replace orchestrator execution**:
-   ```python
-   from policy.orchestrator import Orchestrator
-   
-   class VLAOrchestrator(Orchestrator):
-       def __init__(self, env, perception, vla_model_path):
-           super().__init__(env, perception)
-           self.vla = self.core.compile_model(vla_model_path, "CPU")
-       
-       def execute_instruction(self, instruction):
-           obs = self._get_obs()
-           action = self.vla({"obs": obs, "instruction": instruction})
-           return self._execute_actions(action)
-   ```
-
-3. **Benchmark**:
-   ```bash
-   python scripts/benchmark_openvino.py --model-path models/vla_openvino/vla.xml --device CPU
-   ```
-
----
-
-## Citation
-
-If you use this codebase, please cite the Intel Physical AI Online Challenge.
-
----
+- The bundled SmolVLA checkpoint is 6D and single-arm in this environment.
+- It has not been fine-tuned or validated for full dinner-table success.
+- CPU execution is suitable for verification but may be too slow for interactive
+  real-time control.
+- OpenVINO export and task-quality equivalence remain unverified.
+- The classical skill stack is a development baseline, not a guaranteed expert.
 
 ## License
 
-MIT License - See LICENSE file for details.
+Released under the [MIT License](LICENSE).

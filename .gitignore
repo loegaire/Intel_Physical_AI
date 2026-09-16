@@ -46,5 +46,12 @@ models/
 # Logs
 *.log
 
-# Generated assets (can be regenerated with scripts/generate_assets.py)
-assets/so101/so101_generated.xml
+# Hand-tuned primitive SO-101 model: the environment runs on this file
+# without STL meshes, so it is tracked despite the *.xml rule above.
+!assets/so101/so101_generated.xml
+
+# Secrets (HF_TOKEN etc.)
+.env
+
+# Generated benchmark artifacts
+benchmark_results.json
