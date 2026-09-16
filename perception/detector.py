@@ -71,7 +71,7 @@ class ObjectClass:
 #     only the world-z height mask separates shaft from tray)
 #   handle renders hue ~8-10, sat ~12-60 depending on lighting
 # floor_z values match envs/world.xml geometry: countertop top z=0.75,
-# placemat top z=0.7535, drawer tray floor top z=0.612.
+# placemat top z=0.7535, drawer tray floor top z=0.710.
 CLASSES: dict[str, ObjectClass] = {
     "mug":    ObjectClass(hsv_lo=(8, 55, 60),     hsv_hi=(26, 255, 255),
                           z_offset=0.027, size_px=(25, 4000),
@@ -84,11 +84,11 @@ CLASSES: dict[str, ObjectClass] = {
                           floor_z=0.750, height_lo=0.005, height_hi=0.045),
     "spoon":  ObjectClass(hsv_lo=(85, 0, 140),    hsv_hi=(130, 60, 255),
                           z_offset=0.004, size_px=(8, 4000),
-                          floor_z=0.612, height_lo=0.002, height_hi=0.030,
+                          floor_z=0.710, height_lo=0.002, height_hi=0.030,
                           elongated=True),
     "fork":   ObjectClass(hsv_lo=(85, 0, 140),    hsv_hi=(130, 60, 255),
                           z_offset=0.004, size_px=(8, 4000),
-                          floor_z=0.612, height_lo=0.002, height_hi=0.030,
+                          floor_z=0.710, height_lo=0.002, height_hi=0.030,
                           elongated=True),
     # gold drawer handle post (~2 x 6 cm) on the drawer front
     "__handle": ObjectClass(hsv_lo=(3, 0, 50),    hsv_hi=(16, 255, 225),
@@ -109,7 +109,7 @@ class ObjectDetector:
         "spoon":  ("tray",),
         "fork":   ("tray",),
         # the handle travels +x by the drawer travel (closed x = -0.54)
-        "__handle": (-0.80, -0.25, -0.31, -0.05, 0.56, 0.78),
+        "__handle": (-0.55, -0.05, -0.31, -0.05, 0.68, 0.86),
     }
 
     GRIP_EXCLUDE_R = 0.055     # m self-image suppression radius per gripper
@@ -149,7 +149,7 @@ class ObjectDetector:
             # tray interior, shrunk by the wall thickness; x follows the
             # estimated drawer slide (closed interior x [-0.795,-0.555])
             return np.array([-0.795 + tray_shift, -0.555 + tray_shift,
-                             -0.255, -0.105, 0.585, 0.70])
+                             -0.255, -0.105, 0.705, 0.75])
         return np.array(v, dtype=float)
 
     def _detect_one(self, name: str, hsv: np.ndarray, depth: np.ndarray,
@@ -196,7 +196,7 @@ class ObjectDetector:
             h_px = stats[i, cv2.CC_STAT_HEIGHT]
             if max(w_px, h_px) > 0.55 * res:        # implausibly huge blob
                 continue
-            cy, cx = cents[i]                        # (x, y) centroid
+            cx, cy = cents[i]                        # OpenCV returns (x, y)
             score = float(area)
             if prior is not None:
                 prior_px, _ = camera.project(prior[None, :])

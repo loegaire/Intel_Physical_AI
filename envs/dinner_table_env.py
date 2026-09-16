@@ -40,16 +40,16 @@ WORLD_XML = os.path.join(ROOT, "envs", "world.xml")
 SO101_XML = os.path.join(ROOT, "assets", "so101", "so101.xml")
 
 # Drawer geometry (world frame; see envs/world.xml):
-# drawer body frame at world (-0.68, -0.18, 0); tray floor top at z = 0.612.
+# drawer body frame at world (-0.68, -0.18, 0); tray floor top at z = 0.710.
 # The cabinet stands LEFT of the countertop (x < -0.50). The tray slides
 # +x by qpos (0.26 fully open). CLOSED tray interior x [-0.805,-0.545];
 # OPEN tray x [-0.545,-0.285] — the open tray's -x end is left of the
 # countertop edge (-0.40) in the clear zone.
 DRAWER_UNIT_POS = np.array([-0.68, -0.18, 0.0])
-DRAWER_FLOOR_Z = 0.562
+DRAWER_FLOOR_Z = 0.710
 DRAWER_TRAVEL = 0.26
 # handle centre world (closed) — grasp target for the open-drawer skill
-DRAWER_HANDLE_POS = np.array([-0.515, -0.18, 0.67])
+DRAWER_HANDLE_POS = np.array([-0.398, -0.162, 0.758])
 
 # --------------------------------------------------------------------------- #
 # Scene constants
@@ -75,11 +75,10 @@ DEFAULT_OBJECTS = (
     ("plate",  (0.00, -0.08, COUNTERTOP_Z + 0.008), (0.25, 0.03)),
     ("mug",    (-0.05,  0.14, COUNTERTOP_Z + 0.042), (0.31, -0.10)),
     ("bottle", (0.30,  0.17, COUNTERTOP_Z + 0.075), None),
-    # Utensils start at the tray's -x end (local x ≈ -0.06/-0.10) so that
-    # when the drawer opens they land in the clear zone left of the
-    # countertop edge (world x < -0.40).
-    ("spoon",  (-0.6425, -0.17, DRAWER_FLOOR_Z + 0.020), (0.11, 0.10)),
-    ("fork",   (-0.6425, -0.245, DRAWER_FLOOR_Z + 0.020), (0.11, -0.10)),
+    # Utensil heads slightly overhang the slotted front bar, leaving a
+    # reachable top-down grasp point after the drawer opens.
+    ("spoon",  (-0.580, -0.17, DRAWER_FLOOR_Z + 0.020), (0.11, 0.10)),
+    ("fork",   (-0.580, -0.245, DRAWER_FLOOR_Z + 0.020), (0.11, -0.10)),
 )
 
 OBJ_RGBA = {
@@ -198,9 +197,10 @@ class DinnerTableEnv:
     def _add_object(self, spec, name: str, start, goal):
         """Add one randomized task object; returns its spec dict.
 
-        Utensils (spoon/fork) are attached to the *drawer* body (local
-        coordinates) so they ride with the tray; everything else goes on
-        the worldbody in world coordinates.
+        Every task object is a free body so grasping can actually move it.
+        Utensils start inside the drawer and ride with it through ordinary
+        contact/friction; welding them to the drawer would make a successful
+        grasp physically impossible.
         """
         cfg = self.rand_cfg
         # _rand returns np.float64 (a Python-float subclass) — MuJoCo accepts them
@@ -215,30 +215,28 @@ class DinnerTableEnv:
         yaw = self._rand(-cfg.yaw_jitter, cfg.yaw_jitter)
 
         if name in ("spoon", "fork"):
-            # drawer-local coordinates: drawer body frame at world
-            # DRAWER_UNIT_POS, tray floor top at local z = 0.562.
+            # World coordinates inside the closed drawer.  Keep the long
+            # utensil inside the tray bounds while allowing small x jitter.
             # Utensils are laid ACROSS the tray (yaw ±90°) at the -y end,
             # overhanging the -y wall so the arm can grasp the tail
             # horizontally from outside the tray.
-            local_start = np.array(start) - DRAWER_UNIT_POS
-            local_start = (local_start[0] + 0.5 * jx,
-                           local_start[1],
-                           local_start[2])
-            local_start = (np.clip(local_start[0], 0.05, 0.09),
-                           np.clip(local_start[1], -0.065, 0.065),
-                           local_start[2])
+            world_start = (
+                float(np.clip(start[0] + 0.5 * jx, -0.590, -0.570)),
+                start[1],
+                start[2],
+            )
             # yaw along the tray's x-axis so the tail overhangs the open
             # front (grasp corridor); jittered
             across = 0.5 * self._rand(-cfg.yaw_jitter, cfg.yaw_jitter)
-            parent = spec.body("drawer")
-            b = parent.add_body(name=name, pos=list(local_start),
+            b = spec.worldbody.add_body(name=name, pos=list(world_start),
                                 quat=_yaw_quat(across))
-            world_start = (start[0] + 0.5 * jx, start[1], start[2])
         else:
-            parent = spec.worldbody
             world_start = (start[0] + jx, start[1] + jy, start[2])
-            b = parent.add_body(name=name, pos=list(world_start),
-                                quat=_yaw_quat(yaw))
+            b = spec.worldbody.add_body(
+                name=name, pos=list(world_start), quat=_yaw_quat(yaw)
+            )
+
+        b.add_freejoint()
 
         rgba = np.array(OBJ_RGBA[name])
         if self.randomize:
@@ -285,7 +283,7 @@ class DinnerTableEnv:
             # capsule axis is local +z; rotate +90° about +y so it lies
             # along local +x (matches the head offset below)
             add_geom(name, mujoco.mjtGeom.mjGEOM_CAPSULE,
-                     (0.0045, L / 2 - 0.02), pos=(0.0, 0.0, 0.0),
+                     (0.006, L / 2 - 0.02), pos=(0.0, 0.0, 0.0),
                      quat=[0.70710678, 0.0, 0.70710678, 0.0])
             if name == "spoon":
                 add_geom(f"{name}_head", mujoco.mjtGeom.mjGEOM_SPHERE,
@@ -340,6 +338,7 @@ class DinnerTableEnv:
         mujoco.mj_resetData(self.model, self.data)
         self._elapsed = 0
         self._poured = False
+        self._drawer_latched_open = False
         for arm in ARMS:
             for jid, q in zip(self._arm_joint_ids[arm],
                               self.ARM_HOME[arm], strict=True):
@@ -364,17 +363,18 @@ class DinnerTableEnv:
     def gripper_site_pos(self, arm: str) -> np.ndarray:
         return self.data.site_xpos[self._arm_site_ids[arm]].copy()
 
-    def set_pose_provider(self, provider) -> None:
+    def set_pose_provider(self, provider, allow_fallback: bool = True) -> None:
         """Route object pose queries through an estimator.
 
         ``provider(name) -> (pos(3,), yaw | None) | None``. When set,
-        ``object_pos`` / ``object_xaxis`` return the provider estimate
-        (falling back to simulator state if the provider has no estimate
-        or returns None). The skill layer consumes poses exclusively via
+        ``object_pos`` / ``object_xaxis`` return the provider estimate.
+        Development runs may opt into simulator fallback; strict evaluation
+        raises when an estimate is unavailable. The skill layer consumes poses exclusively via
         these accessors, so swapping privileged state for perception is a
         one-line change at the orchestrator level.
         """
         self._pose_provider = provider
+        self._pose_provider_allow_fallback = bool(allow_fallback)
 
     def _provider_pose(self, name: str):
         provider = getattr(self, "_pose_provider", None)
@@ -390,20 +390,34 @@ class DinnerTableEnv:
         est = self._provider_pose(name)
         if est is not None and est[0] is not None:
             return np.asarray(est[0], dtype=float).copy()
+        if getattr(self, "_pose_provider", None) is not None and not getattr(
+            self, "_pose_provider_allow_fallback", True
+        ):
+            raise LookupError(f"No camera-based pose available for {name!r}")
         return self.data.xpos[self._obj_body_ids[name]].copy()
 
     def object_yaw(self, name: str) -> float | None:
         est = self._provider_pose(name)
         if est is not None:
             return est[1]
+        if getattr(self, "_pose_provider", None) is not None and not getattr(
+            self, "_pose_provider_allow_fallback", True
+        ):
+            raise LookupError(f"No camera-based yaw available for {name!r}")
         m = self.data.xmat[self._obj_body_ids[name]].reshape(3, 3)
         return float(np.arctan2(m[1, 0], m[0, 0]))
 
     def object_xaxis(self, name: str) -> np.ndarray:
         """Object body +x axis in world (utensil shaft direction)."""
-        yaw = self.object_yaw(name)
-        if yaw is not None:
-            return np.array([math.cos(yaw), math.sin(yaw), 0.0])
+        # A camera pose provider currently supplies yaw only, so preserve its
+        # non-privileged horizontal estimate.  Without a provider, retain the
+        # full simulator axis including roll/pitch; free utensils can tilt in
+        # the tray and their head height then differs materially from the body
+        # centre.
+        if getattr(self, "_pose_provider", None) is not None:
+            yaw = self.object_yaw(name)
+            if yaw is not None:
+                return np.array([math.cos(yaw), math.sin(yaw), 0.0])
         m = self.data.xmat[self._obj_body_ids[name]].reshape(3, 3)
         return m[:, 0].copy()
 
@@ -415,7 +429,9 @@ class DinnerTableEnv:
         st["drawer_open"] = bool(self.data.qpos[self._drawer_qadr] > 0.24)
         for o in self.object_specs:
             name = o["name"]
-            pos = self.object_pos(name)
+            # Evaluation is allowed to inspect simulator ground truth; policy
+            # and skills still go through object_pos and its strict camera gate.
+            pos = self.data.xpos[self._obj_body_ids[name]].copy()
             st[f"{name}_pos"] = pos
             if o["goal"] is not None:
                 dist_xy = np.hypot(pos[0] - o["goal"][0], pos[1] - o["goal"][1])
@@ -457,6 +473,18 @@ class DinnerTableEnv:
             self.set_control(action)
         for _ in range(SIMSTEPS_PER_CTRL):
             mujoco.mj_step(self.model, self.data)
+            # Model the drawer's real-world open detent.  Once pulled past
+            # the task threshold it cannot be shoved closed accidentally by
+            # a gripper entering the tray, but remains a dynamic slide while
+            # it is being opened.
+            if self.data.qpos[self._drawer_qadr] >= 0.24:
+                self._drawer_latched_open = True
+            if self._drawer_latched_open \
+                    and self.data.qpos[self._drawer_qadr] < 0.24:
+                self.data.qpos[self._drawer_qadr] = 0.24
+                dof = self.model.jnt_dofadr[self._drawer_jid]
+                self.data.qvel[dof] = max(0.0, self.data.qvel[dof])
+                mujoco.mj_forward(self.model, self.data)
         self._elapsed += 1
         st = self.task_state()
         return self._get_obs(), self._reward(st), self._done(), {"state": st}
@@ -517,6 +545,12 @@ class DinnerTableEnv:
     def camera_obs(self, names=("overhead", "drawer_cam", "placemat_cam")):
         return {cam: self.render(camera=cam, height=224, width=224)
                 for cam in names}
+
+    def close(self) -> None:
+        """Release the MuJoCo renderer deterministically."""
+        if self._renderer is not None:
+            self._renderer.close()
+            self._renderer = None
 
 
 def make_env(seed: int = 0, randomize: bool = True, **kwargs):

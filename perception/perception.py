@@ -35,7 +35,7 @@ CAMERA_ASSIGNMENT = {
 
 # drawer geometry (must match envs.dinner_table_env): world x of the
 # handle post centre when the drawer is closed
-HANDLE_X_CLOSED = -0.540
+HANDLE_X_CLOSED = -0.398
 DRAWER_TRAVEL = 0.26
 
 
@@ -96,6 +96,12 @@ class PerceptionModule:
         self.last_detections.clear()
         self.drawer_q = None
         self._step = 0
+
+    def close(self) -> None:
+        """Release per-camera renderers deterministically."""
+        for renderer in self._renderers.values():
+            renderer.close()
+        self._renderers.clear()
 
     def update(self, drawer_shift: float | None = None, force: bool = False) \
             -> dict[str, Detection]:

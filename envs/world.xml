@@ -10,8 +10,8 @@
 
     Drawer: sliding drawer in the counter's left end, opening toward +x
     (toward the workspace centre / arm A's working zone). Cavity
-    x [-0.42,-0.16], tray travel 0.24 m along +x. Tray floor top at
-    z = 0.612 (utensils sit there when the drawer is open).
+    x [-0.42,-0.16], tray travel 0.26 m along +x. Tray floor top at
+    z = 0.710, inside arm A's measured reachable workspace.
   -->
   <compiler angle="radian" autolimits="true"/>
   <option timestep="0.005" integrator="implicitfast" cone="elliptic"
@@ -91,29 +91,28 @@
              Slides along +x when qpos positive (axis 1 0 0),
              range [0, 0.26]. CLOSED tray interior (world):
              x [-0.805,-0.545], y [-0.265,-0.095]; OPEN tray: +0.26.
-             Tray floor top at world z = 0.612. -->
+             Tray floor top at world z = 0.710. -->
         <body name="drawer" pos="0 0 0">
           <joint name="drawer_slide" type="slide" axis="1 0 0" range="0 0.26"
-                 damping="1.2" frictionloss="0.35" armature="0.01"/>
+                 damping="1.2" frictionloss="2.0" armature="0.01"/>
           <!-- front panel (closed front face at world x = -0.5525) -->
           <!-- front panel: full-width top bar + one lower side stub. The
                lower band is slotted (y -0.10..0.07) so the gripper jaw
                assembly can pass through axially for utensil retrieval -->
-          <geom name="drawer_front" type="box" pos="0.1275 0 0.6175" size="0.0125 0.10 0.0125" material="drawer_mat"/>
-          <geom name="drawer_front_side" type="box" pos="0.1275 0.085 0.59" size="0.0125 0.015 0.015" material="drawer_mat"/>
-          <!-- handle: vertical post on the front panel's +x face
-               (world x face -0.5275; post spans x [-0.525,-0.505],
-               z [0.61,0.73]) — side-grasped from +x like a utensil
-               shaft, in the clear corridor between cabinet and counter -->
-          <geom name="drawer_handle" type="box" pos="0.19 0 0.62" size="0.010 0.012 0.030"
+          <geom name="drawer_front" type="box" pos="0.1275 0 0.7275" size="0.0125 0.10 0.0125" material="drawer_mat"/>
+          <geom name="drawer_front_side" type="box" pos="0.1275 0.085 0.72" size="0.0125 0.015 0.010" material="drawer_mat"/>
+          <!-- Reachable vertical pull post. World centre (-0.398,-0.162,0.758),
+               aligned with the fingertip at the gripper-site close target.
+               The previous z=0.62 target was below arm A's measured workspace. -->
+          <geom name="drawer_handle" type="box" pos="0.282 0.018 0.758" size="0.012 0.015 0.030"
                 material="handle_mat" friction="1.2 0.005 0.0001"/>
-          <!-- floor (top at world z = 0.612) -->
-          <geom name="drawer_floor" type="box" pos="0 0 0.556" size="0.115 0.09 0.006" material="drawer_inner"/>
+          <!-- floor (top at world z = 0.710) -->
+          <geom name="drawer_floor" type="box" pos="0 0 0.704" size="0.115 0.09 0.006" material="drawer_inner"/>
           <!-- side walls -->
-          <geom name="drawer_wall_n" type="box" pos="0 0.085 0.605" size="0.115 0.0075 0.043" material="drawer_inner"/>
-          <geom name="drawer_wall_s" type="box" pos="0 -0.085 0.605" size="0.115 0.0075 0.043" material="drawer_inner"/>
+          <geom name="drawer_wall_n" type="box" pos="0 0.085 0.725" size="0.115 0.0075 0.015" material="drawer_inner"/>
+          <geom name="drawer_wall_s" type="box" pos="0 -0.085 0.725" size="0.115 0.0075 0.015" material="drawer_inner"/>
           <!-- back wall -->
-          <geom name="drawer_back" type="box" pos="-0.1075 0 0.605" size="0.0075 0.09 0.043" material="drawer_inner"/>
+          <geom name="drawer_back" type="box" pos="-0.1075 0 0.725" size="0.0075 0.09 0.015" material="drawer_inner"/>
         </body>
       </body>
     </body>
