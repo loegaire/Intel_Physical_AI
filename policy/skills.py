@@ -27,7 +27,7 @@ import mujoco
 import numpy as np
 from envs.dinner_table_env import ARM_BASES, COUNTERTOP_Z, DinnerTableEnv
 
-from policy.ik import solve_ik
+from policy.ik import solve_ik, ArmIK
 
 # gripper joint control values
 GRIP_OPEN = 1.20       # gripper qpos target when open
@@ -57,6 +57,7 @@ GRASP_HEIGHTS = {
 
 CLEARANCE = 0.10       # m above countertop for safe transit
 JOINT_RATE = 0.05      # rad per 50 Hz control step (2.5 rad/s)
+OPEN_DRAWER_RATE = 0.10  # faster rate for drawer operations
 
 
 class SkillStatus(enum.Enum):
@@ -214,6 +215,13 @@ class Grasp(Skill):
         self._roll: float | None = None        # locked after alignment
         self._approach: np.ndarray | None = None
         self._grip_q: np.ndarray | None = None # qpos when jaws start closing
+        # IK is deterministic for a phase target but comparatively expensive.
+        # Keep one joint-space branch until the phase changes or perception
+        # reports a material target displacement.
+        self._ik_cache_phase: str | None = None
+        self._ik_cache_target: np.ndarray | None = None
+        self._ik_cache_q: np.ndarray | None = None
+        self._lift_xy: np.ndarray | None = None
 
     # ---- geometry ---- #
     def _obj_spec(self) -> dict:
@@ -268,25 +276,27 @@ class Grasp(Skill):
             # Grasp the overhanging tail horizontally from -y: the grasp
             # point is on the shaft ~2 cm outside the wall (world y of
             # the wall ≈ -0.265).
-            shaft = self._body_x_axis()[:2]
-            ns = np.linalg.norm(shaft)
-            shaft = shaft / ns if ns > 1e-6 else np.array([0.0, 1.0])
+            shaft3 = self._body_x_axis()
+            ns = np.linalg.norm(shaft3)
+            shaft3 = shaft3 / ns if ns > 1e-6 \
+                else np.array([1.0, 0.0, 0.0])
             # utensils lie along the tray's x-axis with the tail
             # overhanging the open drawer front (+x): approach the +x
             # tail from above-front (26° down), jaws straddling the
             # shaft along world y (verified reachable by the workspace
             # feasibility study)
-            # grasp the HEAD (spoon bowl / fork head) at the +x end:
-            # a 2-3 cm solid part that cannot slip through the pinch
-            L = 0.155 * spec["scale"]
-            t = max(L / 2 - 0.02, 0.02)
-            p_a = op[:2] + shaft * t
-            p_b = op[:2] - shaft * t
+            # Grasp the +x shaft segment.  The head can tip down through the
+            # slotted drawer front; staying 2 cm from the body centre keeps
+            # the target on the supported, reachable part of the utensil.
+            t = 0.020 * spec["scale"]
+            p_a = op + shaft3 * t
+            p_b = op - shaft3 * t
             # choose whichever end has larger x (the +x overhang)
             tail = p_a if p_a[0] > p_b[0] else p_b
-            gp = np.array([tail[0], tail[1], op[2]])
-            approach = np.array([-0.9, 0.0, -0.44])
-            approach = approach / np.linalg.norm(approach)
+            gp = tail.copy()
+            # Top-down pinch: the raised tray floor is inside the arm's
+            # reachable workspace and local +x is the insertion axis.
+            approach = np.array([0.0, 0.0, -1.0])
             # jaw axis along world y: horizontal straddle of the shaft
             return gp, approach, np.array([0.0, 1.0])
         # fallback: radial approach at object height
@@ -383,6 +393,7 @@ class Grasp(Skill):
         from policy.ik import solve_ik_fixed_roll, solve_ik_oriented
         env = self.env
         self._phase_t += 1
+        motion_phase = self.phase
         gpos = env.gripper_site_pos(self.arm)
         gp, approach, desired_jaw = self._grasp_data()
         if self._approach is None:
@@ -404,8 +415,13 @@ class Grasp(Skill):
             # For vertical approach (top-down): fixed jaw is ~7 mm below site
             # when open, so site should be ~7 mm above grasp point.
             # For horizontal approach: jaw tips extend ~5 cm forward from site.
-            jaw_ext = 0.007 if abs(approach[2]) > 0.7 else 0.050
-            tgt = gp - approach * jaw_ext
+            if self.obj in ("spoon", "fork"):
+                # gripperframe is slightly offset from the closed fingertip
+                # centre in the primitive SO-101 model.
+                tgt = gp + np.array([-0.004, -0.008, -0.004])
+            else:
+                jaw_ext = 0.007 if abs(approach[2]) > 0.7 else 0.050
+                tgt = gp - approach * jaw_ext
             grip = GRIP_OPEN
             if np.linalg.norm(tgt - gpos) < 0.015 or self._phase_t > 150:
                 self.phase, self._phase_t = "close", 0
@@ -415,15 +431,17 @@ class Grasp(Skill):
             # the reaction shoves the object away
             tgt = gpos.copy()
             grip = GRIP_CLOSED
-            grip_q = self.qpos_of(self.arm)[5]
-            grip_closed = grip_q < (GRIP_CLOSED + 0.1)  # near fully closed
-            if (self._grip_contact() and grip_closed) or self._phase_t > 120:
+            # Contact itself is the meaningful closure criterion: a real
+            # object stops the gripper well before its empty-jaw angle.
+            if self._grip_contact() or self._phase_t > 120:
                 self.phase, self._phase_t = "lift", 0
                 self._lift_base_z = env.object_pos(self.obj)[2]
+                self._lift_xy = gpos[:2].copy()
         elif self.phase == "lift":
             base = self._lift_base_z if self._lift_base_z is not None \
                 else env.object_pos(self.obj)[2]
-            tgt = np.array([gpos[0], gpos[1], base + self.lift_h])
+            lift_xy = self._lift_xy if self._lift_xy is not None else gpos[:2]
+            tgt = np.array([lift_xy[0], lift_xy[1], base + self.lift_h])
             grip = GRIP_CLOSED
             if np.linalg.norm(tgt - gpos) < 0.03 or self._phase_t > 250:
                 obj_now = env.object_pos(self.obj)
@@ -434,31 +452,54 @@ class Grasp(Skill):
         else:                                   # pragma: no cover
             tgt = gpos.copy()
 
-        # oriented IK to the phase target, roll pinned after alignment
-        if self._roll is not None and self.phase in ("insert", "close", "lift"):
+        # Closing only changes the gripper joint; holding the current arm pose
+        # avoids both needless IK work and tiny Cartesian servo oscillations.
+        if motion_phase == "close":
+            q_cmd = self.qpos_of(self.arm).copy()
+            q_cmd[5] = grip
+        else:
+            cache_valid = (
+                self._ik_cache_phase == motion_phase
+                and self._ik_cache_target is not None
+                and self._ik_cache_q is not None
+                and np.linalg.norm(tgt - self._ik_cache_target) < 0.015
+            )
+            if cache_valid:
+                q5 = self._ik_cache_q
+            else:
+                q5 = None
+
+        # Oriented IK to the phase target, roll pinned after alignment.  Solve
+        # only on a cache miss, then rate-limit toward that stable solution.
+        if motion_phase != "close" and q5 is None and self._roll is not None \
+                and motion_phase in ("insert", "lift"):
             res = solve_ik_fixed_roll(
                 env, self.arm, tgt, self._roll,
                 q_init=self.qpos_of(self.arm)[:4], restarts=4, steps=200)
             if res.ok:
-                q_cmd = self.qpos_of(self.arm).copy()
-                q_cmd[:5] = self._rate_limited(q_cmd[:5], res.qpos)
-                q_cmd[5] = grip
+                q5 = res.qpos.copy()
             else:
-                q_cmd = self.qpos_of(self.arm)
-                q_cmd = q_cmd.copy()
-                q_cmd[5] = grip
-        else:
+                self.status = SkillStatus.FAILURE
+        elif motion_phase != "close" and q5 is None:
             approach_use = self._approach if self._approach is not None \
                 else approach
-            tilt_tol = 0.55 if self.phase in ("hover", "insert") else 0.30
+            tilt_tol = 0.55 if motion_phase in ("hover", "insert") else 0.30
             # hover phase needs more exploration to escape local minima
-            restarts = 12 if self.phase == "hover" else 6
-            steps = 800 if self.phase == "hover" else 600
+            restarts = 12 if motion_phase == "hover" else 6
+            steps = 800 if motion_phase == "hover" else 600
             ok, q5, _ = solve_ik_oriented(
                 env, self.arm, tgt, approach_use,
                 q_init=self.qpos_of(self.arm)[:5], restarts=restarts,
                 tilt_tol=tilt_tol, steps=steps)
-            if ok:
+            if not ok:
+                self.status = SkillStatus.FAILURE
+
+        if motion_phase != "close":
+            if q5 is not None:
+                if not cache_valid:
+                    self._ik_cache_phase = motion_phase
+                    self._ik_cache_target = tgt.copy()
+                    self._ik_cache_q = q5.copy()
                 q_cmd = self.qpos_of(self.arm).copy()
                 q_cmd[:5] = self._rate_limited(q_cmd[:5], q5)
                 q_cmd[5] = grip
@@ -544,19 +585,16 @@ class Place(Skill):
 class OpenDrawer(Skill):
     """Side-grasp the vertical handle post and pull the tray open (+x).
 
-    The handle is a vertical post on the drawer front's +x face
-    (world (-0.517, -0.18, 0.67)). All phases use oriented IK with a
-    consistent -x approach (same configuration basin), so the joint
-    trajectory tracks smoothly: transit above the corridor in the same
-    orientation -> descend the pre-grasp column -> slide onto the post
-    -> close -> pull. Drawer force is applied via the drawer actuator
-    only while the gripper physically holds the handle.
+    The handle is a vertical post on the drawer front's +x face.  Each
+    Cartesian phase caches one position-IK branch so the joint trajectory
+    remains smooth: transit -> descend -> insert -> close -> pull.  The arm
+    leads the moving post while a small drawer motor compensates friction.
     """
 
-    HANDLE_POS_CLOSED = np.array([-0.49, -0.18, 0.62])   # world frame
+    HANDLE_POS_CLOSED = np.array([-0.398, -0.162, 0.758])  # world frame
 
     def __init__(self, env, arm: str = "A", open_qpos: float = 0.26,
-                 pull_force: float = 80.0, max_steps: int = 700):
+                 pull_force: float = 4.0, max_steps: int = 700):
         super().__init__(env, max_steps)
         self.arm = arm
         self.open_qpos = open_qpos
@@ -567,6 +605,9 @@ class OpenDrawer(Skill):
         self._q_tgt: np.ndarray | None = None    # target the cache solved
         self._held_once = False                  # verified handle contact
         self._roll: float | None = None          # locked pinch-plane roll
+        # Transit subphase for phased motion
+        self._transit_subphase = "lift"
+        self._transit_q_target: np.ndarray | None = None
 
     def _handle_pos(self) -> np.ndarray:
         q = self.env.data.qpos[self.env._drawer_qadr]
@@ -579,6 +620,13 @@ class OpenDrawer(Skill):
         self._phase_t = 0
         self._q_sol = None            # force a fresh IK for the new target
         self._q_tgt = None
+        # Pre-compute transit target joint configuration
+        if new_phase == "transit":
+            self._transit_q_target = None
+            self._transit_subphase = "lift"
+            if hasattr(self, '_lift_xy'):
+                delattr(self, '_lift_xy')
+            self._transit_subphase = "lift"
 
     def _act(self) -> np.ndarray:
         env = self.env
@@ -594,31 +642,51 @@ class OpenDrawer(Skill):
         # Vertical-post side-grasp plan. Jaws extend ~5 cm past the site
         # along the gripper's -z; the post face is at hp[0]+0.0125, so the
         # close-phase site sits at POST_X with tips wrapping the post.
-        PRE_X = -0.42          # pre-grasp column (5 cm clear of the post)
+        PRE_X = -0.34          # pre-grasp column inside measured arm-A workspace
+        # The post is offset toward the drawer's front edge so that the
+        # gripper-site path at y=-0.18 places it between both jaws.
+        PRE_Y = -0.18
         global PRE_X_LOCAL
-        PRE_X_LOCAL = -0.42
-        CLOSE_X = -0.475       # site wrapping the protruding post (tips ≈ site − 1.5 cm)
+        PRE_X_LOCAL = -0.34
+        CLOSE_X = -0.40        # jaw tips extend toward the post at x=-0.45
         if self.phase == "transit":
-            # high transit in the same oriented basin as the grasp
-            tgt = np.array([PRE_X, -0.18, 0.85])
-            if np.linalg.norm(tgt - gpos) < 0.03 or self._phase_t > 300:
-                self._set_phase("descend")
-                tgt = np.array([PRE_X, -0.18, hp[2]])
+            # Phased transit like MoveTo: lift -> translate -> descend
+            if self._transit_subphase == "lift":
+                if not hasattr(self, '_lift_xy'):
+                    self._lift_xy = gpos[:2].copy()
+                tgt = np.array([self._lift_xy[0], self._lift_xy[1], 0.95])  # lift to clearance
+                if gpos[2] >= 0.93 or self._phase_t > 150:
+                    self._transit_subphase = "translate"
+                    self._transit_q_target = None  # recompute for translate
+                    delattr(self, '_lift_xy')
+                    tgt = np.array([PRE_X, PRE_Y, 0.95])
+            elif self._transit_subphase == "translate":
+                tgt = np.array([PRE_X, PRE_Y, 0.95])  # translate at clearance height
+                if (np.hypot(tgt[0] - gpos[0], tgt[1] - gpos[1]) < 0.03
+                        and abs(tgt[2] - gpos[2]) < 0.03) or self._phase_t > 300:
+                    self._transit_subphase = "descend"
+                    self._transit_q_target = None  # recompute for descend
+                    tgt = np.array([PRE_X, PRE_Y, 0.85])
+            else:  # descend
+                tgt = np.array([PRE_X, PRE_Y, 0.85])  # descend to final transit height
+                if np.linalg.norm(tgt - gpos) < 0.03 or self._phase_t > 450:
+                    self._set_phase("descend")
+                    tgt = np.array([PRE_X, PRE_Y, hp[2]])
         elif self.phase == "descend":
             # down the pre-grasp column to post-centre height
-            tgt = np.array([PRE_X, -0.18, hp[2]])
+            tgt = np.array([PRE_X, PRE_Y, hp[2]])
             if np.linalg.norm(tgt - gpos) < 0.02 or self._phase_t > 250:
                 self._align_roll_for_post(hp)
                 self._set_phase("insert")
-                tgt = np.array([CLOSE_X, -0.18, hp[2]])
+                tgt = np.array([CLOSE_X, PRE_Y, hp[2]])
         elif self.phase == "insert":
             # slide -x so the jaws wrap the post
-            tgt = np.array([CLOSE_X, -0.18, hp[2]])
+            tgt = np.array([CLOSE_X, PRE_Y, hp[2]])
             if (env.gripper_handles_drawer(self.arm)
                     or self._phase_t > 150):
                 self._set_phase("close")
         elif self.phase == "close":
-            tgt = np.array([CLOSE_X, -0.18, hp[2]])
+            tgt = np.array([CLOSE_X, PRE_Y, hp[2]])
             grip = GRIP_CLOSED
             if env.gripper_handles_drawer(self.arm):
                 self._held_once = True
@@ -626,38 +694,71 @@ class OpenDrawer(Skill):
                     or self._phase_t > 100:
                 self._set_phase("pull")
         elif self.phase == "pull":
-            # ride with the post: the site target follows the measured
-            # handle x, IK re-solved every step from the current pose
+            # Pull ahead of the measured post rather than merely following
+            # it.  The lead makes the arm servo provide the opening force;
+            # the small drawer motor only compensates slide friction.
+            pull_lead = 0.06
             tgt = np.array([CLOSE_X + (self._handle_pos()[0]
-                                       - self.HANDLE_POS_CLOSED[0]),
-                            -0.18, hp[2]])
+                                       - self.HANDLE_POS_CLOSED[0])
+                            + pull_lead,
+                            PRE_Y, hp[2]])
             grip = GRIP_CLOSED
             if env.data.qpos[env._drawer_qadr] >= self.open_qpos - 0.015:
                 self.status = SkillStatus.SUCCESS
         else:                                   # pragma: no cover
             tgt = gpos.copy()
 
-        # IK per phase: oriented (-x) until the roll is locked, then
-        # fixed-roll IK keeps the pinch plane straddling the post; during
-        # pull the target rides with the handle (re-solve every step)
-        from policy.ik import solve_ik_fixed_roll, solve_ik_oriented
-        if self.phase == "pull":
+        # IK per phase; during pull the target rides ahead of the handle and
+        # is therefore re-solved every step.
+        # For transit lift: compute target joint config once, then rate-limit.
+        # For transit translate/descend: use ArmIK for continuous control.
+        from policy.ik import solve_ik
+        if self.phase in ("pull",):
             self._q_sol = None
         q_sol = self._q_sol
-        if q_sol is None:
-            if self._roll is not None and self.phase in ("insert", "close", "pull"):
-                res = solve_ik_fixed_roll(
-                    self.env, self.arm, tgt, self._roll,
-                    q_init=self.qpos_of(self.arm)[:4],
-                    restarts=8, steps=250, tol=0.008)
-                ok = res.ok
-                q5 = res.qpos if res.ok else None
+        if self.phase == "transit":
+            if self._transit_subphase == "lift":
+                # Compute lift target joint config once
+                if self._transit_q_target is None:
+                    res = solve_ik(
+                        self.env, self.arm, tgt,
+                        q_init=self.qpos_of(self.arm)[:5],
+                        restarts=12, steps=300, tol=0.006)
+                    if not res.ok:
+                        self.status = SkillStatus.FAILURE
+                        return self._pack(*self._two_arm_hold())
+                    self._transit_q_target = res.qpos.copy()
+                # Rate-limit towards pre-computed target
+                q_cmd = self.qpos_of(self.arm).copy()
+                q_cmd[:5] = self._rate_limited(q_cmd[:5], self._transit_q_target, rate=OPEN_DRAWER_RATE)
+                q_cmd[5] = grip
             else:
-                tilt = 0.55 if self.phase in ("insert", "close", "pull") else 0.30
-                ok, q5, _ = solve_ik_oriented(
-                    self.env, self.arm, tgt, np.array([-1.0, 0.0, 0.0]),
-                    q_init=self.qpos_of(self.arm)[:5], restarts=24,
-                    tilt_tol=tilt)
+                # Keep one IK branch for the whole subphase. Re-solving from
+                # scratch can alternate between valid joint basins, causing
+                # the rate-limited shoulder command to oscillate around zero.
+                if self._transit_q_target is None:
+                    res = solve_ik(
+                        self.env, self.arm, tgt,
+                        q_init=self.qpos_of(self.arm)[:5],
+                        restarts=12, steps=300, tol=0.006)
+                    if not res.ok:
+                        self.status = SkillStatus.FAILURE
+                        return self._pack(*self._two_arm_hold())
+                    self._transit_q_target = res.qpos.copy()
+                q_cmd = self.qpos_of(self.arm).copy()
+                q_cmd[:5] = self._rate_limited(
+                    q_cmd[:5], self._transit_q_target,
+                    rate=OPEN_DRAWER_RATE,
+                )
+                q_cmd[5] = grip
+        elif q_sol is None:
+            res = solve_ik(
+                self.env, self.arm, tgt,
+                q_init=self.qpos_of(self.arm)[:5],
+                restarts=12, steps=300, tol=0.008,
+            )
+            ok = res.ok
+            q5 = res.qpos if res.ok else None
             if not ok:
                 # transient IK failure: hold and retry next step (the arm
                 # pose drifts slightly as it settles, changing the warm
@@ -671,9 +772,10 @@ class OpenDrawer(Skill):
                 return self._pack(*self._two_arm_hold())
             q_sol = q5
             self._q_sol = q_sol
-        q_cmd = self.qpos_of(self.arm).copy()
-        q_cmd[:5] = self._rate_limited(q_cmd[:5], q_sol)
-        q_cmd[5] = grip
+        if self.phase != "transit":
+            q_cmd = self.qpos_of(self.arm).copy()
+            q_cmd[:5] = self._rate_limited(q_cmd[:5], q_sol, rate=OPEN_DRAWER_RATE)
+            q_cmd[5] = grip
         def _holding() -> bool:
             # Power-assist drawer: the gripper verified contact in the
             # close phase; during the pull the actuator carries the load
@@ -703,40 +805,9 @@ class OpenDrawer(Skill):
         return bool(self.qpos_of(self.arm)[5] < 0.2)
 
     def _align_roll_for_post(self, hp: np.ndarray) -> None:
-        """Sweep wrist_roll at the pre-grasp pose so the pinch plane
-        straddles the post (jaw axis aligned with world +y/-y), then
-        keep that roll for the rest of the skill via fixed-roll IK."""
-        from policy.ik import solve_ik_oriented
-        env = self.env
-        pre = np.array([-0.44, -0.26, hp[2]])
-        ok, q, _ = solve_ik_oriented(env, self.arm, pre,
-                                     np.array([-1.0, 0.0, 0.0]),
-                                     q_init=self.qpos_of(self.arm)[:5],
-                                     restarts=16, tilt_tol=0.55)
-        if not ok:
-            return
-        qadr5 = [env.model.jnt_qposadr[j]
-                 for j in env._arm_joint_ids[self.arm][:5]]
-        g0 = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM,
-                               f"{self.arm}/fixed_jaw_box3")
-        g1 = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM,
-                               f"{self.arm}/moving_jaw_sph_tip1")
-        backup = env.data.qpos[qadr5].copy()
-        best_roll, best_score = q[4], -1.0
-        for roll in np.linspace(-2.7, 2.7, 14):
-            env.data.qpos[qadr5] = q
-            env.data.qpos[qadr5[4]] = roll
-            mujoco.mj_forward(env.model, env.data)
-            axis = (env.data.geom_xpos[g1] - env.data.geom_xpos[g0])[:2]
-            n_ax = np.linalg.norm(axis)
-            if n_ax < 1e-9:
-                continue
-            score = abs(axis[1]) / n_ax     # jaw axis along world y
-            if score > best_score:
-                best_score, best_roll = score, roll
-        env.data.qpos[qadr5] = backup
-        mujoco.mj_forward(env.model, env.data)
-        self._roll = best_roll
+        """Retain the continuous wrist branch reached during descent."""
+        del hp
+        self._roll = float(self.qpos_of(self.arm)[4])
 
 
 class Pour(Skill):

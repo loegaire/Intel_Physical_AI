@@ -209,8 +209,9 @@ def solve_ik_oriented(env, arm: str, target: np.ndarray, approach: np.ndarray,
 
     Solves for the site position AND rotates the gripper's z-axis (its
     approach direction) toward ``approach``. The orientation error is
-    weighted by ``qw`` and only the first two cross-product components
-    are used, giving a well-conditioned 5-D task for the 5 arm joints.
+    weighted by ``qw``.  All three world-axis components are retained:
+    dropping a fixed component is singular whenever the desired approach
+    happens to align with that world axis.
 
     Returns (ok, qpos_5, iters); world state is restored on return.
     """
@@ -225,6 +226,26 @@ def solve_ik_oriented(env, arm: str, target: np.ndarray, approach: np.ndarray,
 
     rng = np.random.default_rng(seed)
     starts: list = []
+    # Position IK has a much larger basin of attraction.  For this 5-DoF
+    # arm, reachable top-down poses commonly satisfy the relaxed approach
+    # tolerance already; use that result before running the coupled solver.
+    pos_seed = solve_ik(
+        env, arm, target, q_init=q_init,
+        steps=min(steps, 400), tol=tol,
+        damping=1e-4, pos_weight=0.15,
+        restarts=restarts, seed=seed,
+    )
+    if pos_seed.ok:
+        data.qpos[qadr] = pos_seed.qpos
+        mujoco.mj_forward(model, data)
+        R = data.site_xmat[sid].reshape(3, 3)
+        axis_err = np.linalg.norm(np.cross(R[:, 0], approach))
+        if axis_err < tilt_tol:
+            q_out = pos_seed.qpos.copy()
+            data.qpos[qadr] = backup
+            mujoco.mj_forward(model, data)
+            return True, q_out, pos_seed.iters
+        starts.append(pos_seed.qpos.copy())
     if q_init is not None:
         starts.append(np.asarray(q_init, dtype=float))
     lo5, hi5 = model.jnt_range[jids].T
@@ -236,10 +257,14 @@ def solve_ik_oriented(env, arm: str, target: np.ndarray, approach: np.ndarray,
         for it in range(steps):
             mujoco.mj_forward(model, data)
             R = data.site_xmat[sid].reshape(3, 3)
-            gz = R[2]
+            # MuJoCo stores a body-to-world rotation matrix row-major and
+            # local basis axes are its columns.  This model's gripperframe
+            # rotates local +x along the jaw insertion direction (see the
+            # site's 90-degree y quaternion), so column 0 is the approach.
+            gripper_approach = R[:, 0]
             perr = target - data.site_xpos[sid]
-            oerr = np.cross(gz, approach)
-            err = np.concatenate([perr, oerr[:2] * qw])
+            oerr = np.cross(gripper_approach, approach)
+            err = np.concatenate([perr, oerr * qw])
             if np.linalg.norm(perr) < tol and np.linalg.norm(oerr) < tilt_tol:
                 q_out = data.qpos[qadr].copy()
                 data.qpos[qadr] = backup
@@ -248,8 +273,8 @@ def solve_ik_oriented(env, arm: str, target: np.ndarray, approach: np.ndarray,
             jacp = np.zeros((3, model.nv))
             jacr = np.zeros((3, model.nv))
             mujoco.mj_jacSite(model, data, jacp, jacr, sid)
-            J5 = np.vstack([jacp[:, qadr], jacr[:2, qadr]])
-            dq = J5.T @ np.linalg.solve(J5 @ J5.T + damping * np.eye(5), err)
+            J6 = np.vstack([jacp[:, qadr], jacr[:, qadr] * qw])
+            dq = J6.T @ np.linalg.solve(J6 @ J6.T + damping * np.eye(6), err)
             alpha = 0.25
             for i, a in enumerate(qadr):
                 lo, hi = model.jnt_range[jids[i]]

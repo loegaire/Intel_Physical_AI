@@ -92,14 +92,28 @@ class Planner:
         The VLA policy (SmolVLA, Pi0.5, ACT) would replace this with an 
         end-to-end learned policy in the full challenge solution.
         
-        Demo plan uses only reliably working skills:
-        - OpenDrawer (works reliably)
+        This is the complete classical expert plan.  It is also the source of
+        demonstrations used to fine-tune a learned policy; individual skill
+        failures remain visible in the per-step result list.
         """
         steps = [
-            # 1. Open drawer with arm A (WORKS)
             SkillSpec("OpenDrawer", {"arm": "A"}, max_retries=1),
+            SkillSpec("Grasp", {"arm": "A", "obj_name": "spoon"}, max_retries=1),
+            SkillSpec("Place", {"arm": "A", "obj_name": "spoon",
+                                "goal_xy": self.PLACE_GOALS["spoon"]}, max_retries=1),
+            SkillSpec("Grasp", {"arm": "A", "obj_name": "fork"}, max_retries=1),
+            SkillSpec("Place", {"arm": "A", "obj_name": "fork",
+                                "goal_xy": self.PLACE_GOALS["fork"]}, max_retries=1),
+            SkillSpec("Grasp", {"arm": "B", "obj_name": "plate"}, max_retries=1),
+            SkillSpec("Place", {"arm": "B", "obj_name": "plate",
+                                "goal_xy": self.PLACE_GOALS["plate"]}, max_retries=1),
+            SkillSpec("Grasp", {"arm": "B", "obj_name": "mug"}, max_retries=1),
+            SkillSpec("Place", {"arm": "B", "obj_name": "mug",
+                                "goal_xy": self.PLACE_GOALS["mug"]}, max_retries=1),
+            SkillSpec("Grasp", {"arm": "A", "obj_name": "bottle"}, max_retries=1),
+            SkillSpec("Pour", {"arm": "A", "hold_arm": "B"}, max_retries=1),
         ]
-        return Plan(steps=steps, description="Demo: open drawer (VLA policy would complete full task)")
+        return Plan(steps=steps, description="Complete classical table-setting expert plan")
 
     def _plan_open_drawer(self) -> Plan:
         return Plan(steps=[SkillSpec("OpenDrawer", {"arm": "A"})],
@@ -142,10 +156,13 @@ class SkillExecutor:
     """Executes a skill to completion, with perception integration."""
 
     def __init__(self, env: DinnerTableEnv, perception: PerceptionModule,
-                 max_skill_steps: int = 1000):
+                 max_skill_steps: int = 1000,
+                 step_callback: Callable[[int, dict], None] | None = None):
         self.env = env
         self.perception = perception
         self.max_skill_steps = max_skill_steps
+        self.step_callback = step_callback
+        self.total_steps = 0
 
     def run_skill(self, skill: Skill, verbose: bool = False) -> SkillStatus:
         """Run a skill until completion or timeout."""
@@ -160,8 +177,24 @@ class SkillExecutor:
         limit = skill_limits.get(skill.__class__.__name__, self.max_skill_steps)
 
         for step in range(limit):
-            action = skill.act()
+            try:
+                action = skill.act()
+            except LookupError as exc:
+                skill.status = SkillStatus.FAILURE
+                if verbose:
+                    print(f"  Skill failed: {exc}")
+                return SkillStatus.FAILURE
             obs, reward, done, info = self.env.step(action)
+            if self.step_callback is not None:
+                transition = dict(info)
+                transition.update({
+                    "observation": obs,
+                    "action": np.asarray(action).copy(),
+                    "reward": float(reward),
+                    "done": bool(done),
+                })
+                self.step_callback(self.total_steps, transition)
+            self.total_steps += 1
 
             # Update perception periodically
             if step % 10 == 0:
@@ -187,12 +220,15 @@ class Orchestrator:
     """Main orchestrator: plan + execute + monitor."""
 
     def __init__(self, env: DinnerTableEnv, perception: Optional[PerceptionModule] = None,
-                 verbose: bool = True):
+                 verbose: bool = True,
+                 step_callback: Callable[[int, dict], None] | None = None,
+                 allow_privileged_fallback: bool = True):
         self.env = env
         self.verbose = verbose
         self.planner = Planner(env)
         self.perception = perception or PerceptionModule(env, update_every=5)
-        self.executor = SkillExecutor(env, self.perception)
+        self.executor = SkillExecutor(env, self.perception,
+                                      step_callback=step_callback)
         self._skill_map = {
             "MoveTo": MoveTo,
             "Grasp": Grasp,
@@ -202,7 +238,10 @@ class Orchestrator:
         }
 
         # Connect perception to env for skill consumption
-        self.env.set_pose_provider(self._perception_provider)
+        self.env.set_pose_provider(
+            self._perception_provider,
+            allow_fallback=allow_privileged_fallback,
+        )
 
     def _perception_provider(self, name: str):
         """Provide object poses from perception to skills."""
@@ -233,12 +272,14 @@ class Orchestrator:
             if self.verbose:
                 print(f"\n[{i+1}/{len(plan.steps)}] {spec.name}({spec.params})")
 
-            skill = self._create_skill(spec)
             status = SkillStatus.FAILURE
 
             for attempt in range(spec.max_retries + 1):
                 if attempt > 0 and self.verbose:
                     print(f"  Retry {attempt}/{spec.max_retries}")
+                # A failed finite-state skill cannot be reused: its status,
+                # phase timers, IK caches and contact history are terminal.
+                skill = self._create_skill(spec)
                 status = self.executor.run_skill(skill, verbose=self.verbose)
                 if status == SkillStatus.SUCCESS:
                     break
@@ -275,12 +316,11 @@ class Orchestrator:
         success, results = self.execute_instruction(instruction)
 
         task_state = self.env.task_state()
-        # Demo success: orchestrator plan completed successfully
-        # Full task success (all objects placed) requires VLA policy
-        demo_success = success
+        full_task_success = bool(self.env.success())
         return {
             "seed": seed,
-            "success": demo_success,
+            "success": full_task_success,
+            "plan_success": success,
             "skill_results": results,
             "task_state": task_state,
             "all_placed": all([
@@ -312,7 +352,6 @@ def run_evaluation(num_seeds: int = 10, verbose: bool = True) -> dict:
         result = orchestrator.run_full_demo(seed)
         results.append(result)
 
-        # Demo success: plan executed successfully (drawer opened)
         if result["success"]:
             successes += 1
             if verbose:
