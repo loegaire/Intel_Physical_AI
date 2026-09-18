@@ -54,11 +54,13 @@ class VideoRecorder:
     """Record the actual control trajectory instead of only the final pose."""
 
     def __init__(self, env: DinnerTableEnv, path: str | None,
-                 fps: int = 50, resolution: tuple[int, int] = (1280, 720)):
+                 fps: int = 50, resolution: tuple[int, int] = (1280, 720),
+                 overlay: dict[str, Any] | None = None):
         self.env = env
         self.path = path
         self.raw_path = None
         self.resolution = resolution
+        self.overlay = overlay or {}
         self.writer = None
         if path:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -74,7 +76,49 @@ class VideoRecorder:
             return
         width, height = self.resolution
         frame = self.env.render(camera="overview", height=height, width=width)
+        self._draw_overlay(frame, _step, _info)
         self.writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+
+    def _draw_overlay(self, frame: np.ndarray, step: int, info: dict[str, Any]) -> None:
+        """Burn the command, seed, and live task state into demo videos."""
+        state = self.env.task_state()
+        instruction = str(self.overlay.get("instruction", DEFAULT_INSTRUCTION))
+        if len(instruction) > 92:
+            instruction = instruction[:89] + "..."
+        placed = ", ".join(
+            name for name, key in (
+                ("plate", "plate_placed"),
+                ("mug", "mug_placed"),
+                ("fork", "fork_placed"),
+                ("spoon", "spoon_placed"),
+                ("filled", "mug_filled"),
+            )
+            if state.get(key)
+        ) or "none"
+        lines = [
+            f"command: {instruction}",
+            f"seed: {self.overlay.get('seed', '?')}  policy: {self.overlay.get('policy', '?')}  step: {step}",
+            f"drawer: {float(state.get('drawer_open', 0.0)):.2f}  completed: {placed}",
+            f"reward: {float(info.get('reward', 0.0)):.2f}  success: {self.env.success()}",
+        ]
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.58
+        thickness = 1
+        line_h = 24
+        margin = 12
+        panel_w = max(
+            cv2.getTextSize(line, font, scale, thickness)[0][0] for line in lines
+        ) + 2 * margin
+        panel_h = line_h * len(lines) + 2 * margin
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (panel_w, panel_h), (18, 24, 28), -1)
+        cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
+        for index, line in enumerate(lines):
+            y = margin + 18 + index * line_h
+            cv2.putText(
+                frame, line, (margin, y), font, scale, (245, 248, 250),
+                thickness, cv2.LINE_AA,
+            )
 
     def close(self) -> None:
         if self.writer is not None:
@@ -124,7 +168,13 @@ def run_demo(
     """Run one episode; ``success`` always means full task completion."""
     env = DinnerTableEnv(seed=seed, randomize=True, render_mode="rgb_array")
     env.reset()
-    recorder = VideoRecorder(env, video_path, video_fps, video_res)
+    recorder = VideoRecorder(
+        env,
+        video_path,
+        video_fps,
+        video_res,
+        overlay={"instruction": instruction, "seed": seed, "policy": policy},
+    )
     perception = None
 
     try:

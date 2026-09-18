@@ -276,7 +276,9 @@ class SmolVLARunner:
             total_reward += float(reward)
             trace.append(VLAStep(step, inference_ms, float(reward), bool(done)))
             if step_callback is not None:
-                step_callback(step, info)
+                transition = dict(info)
+                transition.update({"reward": float(reward), "done": bool(done)})
+                step_callback(step, transition)
             if done:
                 break
 
