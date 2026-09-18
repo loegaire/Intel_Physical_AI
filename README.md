@@ -289,6 +289,8 @@ Intel_Physical_AI/
   real-time control.
 - OpenVINO export and task-quality equivalence remain unverified.
 - The classical skill stack is a development baseline, not a guaranteed expert.
+- The classical demo includes a deterministic `ArrangeDinnerTable` fallback so
+  the online challenge artifact is reproducible without a trained checkpoint.
 
 ## License
 

@@ -16,6 +16,10 @@ from typing import Any
 # frames at 1280x720 on this machine, which shows up as noise in the videos.
 os.environ.setdefault("MUJOCO_GL", "egl")
 
+# MuJoCo selects its renderer backend during import. Use EGL by default so the
+# required evaluation/video scripts work on headless Intel Linux systems.
+os.environ.setdefault("MUJOCO_GL", "egl")
+
 import cv2
 import numpy as np
 

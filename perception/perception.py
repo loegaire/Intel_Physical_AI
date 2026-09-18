@@ -98,10 +98,13 @@ class PerceptionModule:
         self._step = 0
 
     def close(self) -> None:
-        """Release per-camera renderers deterministically."""
+        """Release MuJoCo renderers/GL contexts owned by perception."""
         for renderer in self._renderers.values():
-            renderer.close()
+            close = getattr(renderer, "close", None)
+            if close is not None:
+                close()
         self._renderers.clear()
+        self._cams.clear()
 
     def update(self, drawer_shift: float | None = None, force: bool = False) \
             -> dict[str, Detection]:
@@ -196,3 +199,9 @@ class PerceptionModule:
             "conf": dict(self.conf),
             "drawer_q": self.drawer_q,
         }
+
+    def __del__(self):  # pragma: no cover - best-effort cleanup
+        try:
+            self.close()
+        except Exception:
+            pass

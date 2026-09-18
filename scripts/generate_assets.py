@@ -181,8 +181,9 @@ def write_so101_xml():
               <body name="camera_mount">
                 <camera name="wrist_cam" mode="fixed" pos="0 0.055 -0.045" euler="-0.57 0 0" resolution="1920 1080" sensorsize="0.00576 0.00324" focal="0.0036 0.0036"/>
                 <geom class="visual" pos="0 0 0" size="0.015 0.015 0.003" material="yellow" type="box" quat="0 1 0 0"/>
-                <geom name="camera_box1" class="collision_gripper" type="box" size="0.015 0.015 0.003" pos="-0.0025 0.03 -0.03"/>
-                <geom name="camera_box2" class="collision_gripper" type="box" size="0.021 0.021 0.003" pos="-0.001 0.06 -0.04" euler="-0.55 0 0"/>
+                <!-- Camera collision boxes (disabled like original) -->
+                <geom name="camera_box1" contype="0" conaffinity="0" type="box" size="0.015 0.015 0.003" pos="-0.0025 0.03 -0.03"/>
+                <geom name="camera_box2" contype="0" conaffinity="0" type="box" size="0.021 0.021 0.003" pos="-0.001 0.06 -0.04" euler="-0.55 0 0"/>
               </body>
               
               <!-- Moving jaw -->
